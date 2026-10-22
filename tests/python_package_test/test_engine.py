@@ -3934,6 +3934,91 @@ def test_linear_trees(tmp_path, rng_fixed_seed):
     est = lgb.train(params, train_data, num_boost_round=10)
 
 
+def _get_leaves_with_branch_features(node, branch_features=()):
+    if "leaf_index" in node:
+        return [(node, branch_features)]
+    child_branch_features = branch_features + (node["split_feature"],)
+    return _get_leaves_with_branch_features(node["left_child"], child_branch_features) + _get_leaves_with_branch_features(
+        node["right_child"], child_branch_features
+    )
+
+
+def test_linear_trees_nan_in_zero_coefficient_feature_uses_leaf_value():
+    rng = np.random.default_rng(0)
+    n = 6000
+    flag = rng.integers(0, 2, n).astype(float)
+    z = rng.uniform(0, 1, n)
+    flag[rng.uniform(0, 1, n) < 0.3] = np.nan
+    y = np.where(np.isnan(flag), 3.0, np.where(flag == 0, 2.0 * z, 10.0 + 2.0 * z))
+    X = np.column_stack([flag, z])
+    params = {
+        "objective": "regression",
+        "linear_tree": True,
+        "learning_rate": 0.5,
+        "min_data_in_leaf": 20,
+        "num_leaves": 2,
+        "verbose": -1,
+        "seed": 0,
+        "deterministic": True,
+        "num_threads": 1,
+    }
+
+    booster = lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=3)
+    leaf_of_row = booster.predict(X, start_iteration=1, num_iteration=1, pred_leaf=True).ravel()
+    output = booster.predict(X, start_iteration=1, num_iteration=1, raw_score=True)
+    tree = booster.dump_model()["tree_info"][1]["tree_structure"]
+
+    nan_rows_checked = 0
+    for leaf, branch_features in _get_leaves_with_branch_features(tree):
+        rows = leaf_of_row == leaf["leaf_index"]
+        nan_rows = rows & np.isnan(X[:, list(branch_features)]).any(axis=1)
+        if nan_rows.any():
+            complete_rows = rows & ~np.isnan(X[:, list(branch_features)]).any(axis=1)
+            assert complete_rows.any()
+            assert 0 in branch_features
+            assert 0 in leaf["leaf_features"]
+            zero_coefficient = leaf["leaf_coeff"][leaf["leaf_features"].index(0)]
+            assert zero_coefficient == pytest.approx(0.0)
+            np.testing.assert_allclose(output[nan_rows], leaf["leaf_value"])
+            nan_rows_checked += int(nan_rows.sum())
+    assert nan_rows_checked > 0
+
+
+def test_linear_trees_leaf_without_complete_rows_uses_leaf_value():
+    rng = np.random.default_rng(1)
+    n = 6000
+    a = rng.uniform(0, 1, n)
+    b = rng.uniform(0, 1, n)
+    b[a > 0.6] = np.nan
+    y = np.where(np.isnan(b), 100.0 + 50.0 * (a > 0.8), 100.0 * (b > 0.5)) + rng.normal(0, 1, n)
+    X = np.column_stack([a, b])
+    params = {
+        "objective": "regression",
+        "linear_tree": True,
+        "learning_rate": 0.5,
+        "min_data_in_leaf": 20,
+        "num_leaves": 3,
+        "verbose": -1,
+        "seed": 0,
+        "deterministic": True,
+        "num_threads": 1,
+    }
+
+    booster = lgb.train(params, lgb.Dataset(X, label=y), num_boost_round=3)
+    leaf_of_row = booster.predict(X, start_iteration=1, num_iteration=1, pred_leaf=True).ravel()
+    output = booster.predict(X, start_iteration=1, num_iteration=1, raw_score=True)
+    tree = booster.dump_model()["tree_info"][1]["tree_structure"]
+
+    no_complete_leaf_count = 0
+    for leaf, branch_features in _get_leaves_with_branch_features(tree):
+        rows = leaf_of_row == leaf["leaf_index"]
+        complete = rows & ~np.isnan(X[:, list(branch_features)]).any(axis=1)
+        if rows.any() and not complete.any():
+            np.testing.assert_allclose(output[rows], leaf["leaf_value"])
+            no_complete_leaf_count += 1
+    assert no_complete_leaf_count > 0
+
+
 def test_save_and_load_linear(tmp_path):
     X_train, X_test, y_train, y_test = train_test_split(
         *load_breast_cancer(return_X_y=True), test_size=0.1, random_state=2

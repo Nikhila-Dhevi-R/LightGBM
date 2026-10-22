@@ -275,7 +275,9 @@ void LinearTreeLearner<TREE_LEARNER_TYPE>::CalculateLinear(Tree* tree, bool is_r
             nan_found = true;
             break;
           }
-          num_nonzero[tid][leaf_num] += 1;
+          if (is_refit) {
+            num_nonzero[tid][leaf_num] += 1;
+          }
           curr_row[feat] = val;
         } else {
           curr_row[feat] = raw_data_ptr[leaf_num][feat][i];
@@ -284,6 +286,9 @@ void LinearTreeLearner<TREE_LEARNER_TYPE>::CalculateLinear(Tree* tree, bool is_r
       if (HAS_NAN) {
         if (nan_found) {
           continue;
+        }
+        if (!is_refit) {
+          num_nonzero[tid][leaf_num] += 1;
         }
       }
       curr_row[num_feat] = 1.0;
@@ -365,7 +370,7 @@ void LinearTreeLearner<TREE_LEARNER_TYPE>::CalculateLinear(Tree* tree, bool is_r
         features_new.push_back(leaf_features[leaf_num][i]);
         coeffs_vec.push_back(decay_rate * old_coeffs[i] + (1.0 - decay_rate) * coeffs(i) * shrinkage);
       } else {
-        if (coeffs(i) < -kZeroThreshold || coeffs(i) > kZeroThreshold) {
+        if ((HAS_NAN && std::isfinite(coeffs(i))) || coeffs(i) < -kZeroThreshold || coeffs(i) > kZeroThreshold) {
           coeffs_vec.push_back(coeffs(i));
           int feat = leaf_features[leaf_num][i];
           features_new.push_back(feat);
